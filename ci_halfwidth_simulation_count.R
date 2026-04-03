@@ -11,7 +11,7 @@ library(terra, warn.conflicts = FALSE)
 # PART 1: DATA LOADING & SETUP
 # ============================================================
 
-excel_path <- "H:/scenario_analysis/data/S&P_nickel_17022025.xlsx"
+excel_path <- "your-file-path/S&P_nickel_17022025.xlsx"
 points_data <- read_excel(excel_path) %>%
   filter(STAGE_AGG == "Exploration") %>%
   filter(DEPOSIT_TYPE %in% c("Laterite", "Magmatic Sulphide")) %>%
@@ -330,7 +330,7 @@ write_xlsx(
   list(summary = summary_df,
        ci_calculations = ci_calcs,
        simulation_results = sim_results_df),
-  path = "H:/scenario_analysis/data/ci_halfwidth_results.xlsx"
+  path = "your-file-path/ci_halfwidth_results.xlsx"
 )
 
 cat("\nResults saved to ci_halfwidth_results.xlsx\n")
