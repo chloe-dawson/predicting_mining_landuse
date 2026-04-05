@@ -7,6 +7,8 @@ library(rnaturalearthdata)
 library(rnaturalearthhires)
 library(terra, warn.conflicts = FALSE)
 
+### if needed: install.packages("rnaturalearthhires", repos = "https://ropensci.r-universe.dev") 
+
 # ============================================================
 # PART 1: DATA LOADING & SETUP
 # ============================================================
