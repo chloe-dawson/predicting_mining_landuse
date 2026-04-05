@@ -28,6 +28,12 @@ land_union <- ne_countries(scale = "large", returnclass = "sf") %>%
   st_transform(crs = crs_moll) %>%
   st_union()
 
+# Pre-clip land to areas near mining points for faster lookups
+cat("Pre-clipping land to mining regions...\n")
+all_pts_buf <- st_buffer(st_union(st_geometry(pts_orig)), dist = 100000)  # 100km around all points
+land_clipped <- st_intersection(land_union, all_pts_buf)
+cat("Done. Land clipped from global to mining regions only.\n")
+
 # ============================================================
 # PART 2: DEPOSIT-TYPE PARAMETERS
 # ============================================================
@@ -117,7 +123,7 @@ simulate_union_area <- function() {
       candidate <- orig_pt + c(dx, dy)
       st_crs(candidate) <- crs_moll
       hit <- tryCatch(
-        as.numeric(st_intersects(candidate, land_union, sparse = FALSE)),
+        as.numeric(st_intersects(candidate, land_clipped, sparse = FALSE)),
         error = function(e) 0
       )
       if (!is.na(hit) && hit > 0) {
@@ -143,7 +149,7 @@ simulate_union_area <- function() {
     # --- D) CREATE LAND-ONLY BUFFER ---
     buffer_radius <- sqrt(target_area / pi)
     raw_buffer    <- st_buffer(shifted, dist = buffer_radius)
-    land_buffer   <- safe_intersection(raw_buffer, land_union)
+    land_buffer   <- safe_intersection(raw_buffer, land_clipped)
 
     lb_area <- 0
     if (safe_is_usable(land_buffer)) {
@@ -160,7 +166,7 @@ simulate_union_area <- function() {
       need_cells  <- ceiling(target_area / (cell_size^2))
       bbox_expand <- buffer_radius * 2
       bbox_buf    <- st_buffer(shifted, dist = bbox_expand)
-      land_clip   <- safe_intersection(bbox_buf, land_union)
+      land_clip   <- safe_intersection(bbox_buf, land_clipped)
 
       if (safe_is_usable(land_clip)) {
         r <- tryCatch({
@@ -183,7 +189,7 @@ simulate_union_area <- function() {
           flagged_min <- flagged_min + 1
           fallback_radius <- sqrt(caps$min_area / pi)
           fallback_buf    <- st_buffer(shifted, dist = fallback_radius)
-          fallback_land   <- safe_intersection(fallback_buf, land_union)
+          fallback_land   <- safe_intersection(fallback_buf, land_clipped)
           if (safe_is_usable(fallback_land)) {
             all_geoms[[i]] <- fallback_land
           } else {
