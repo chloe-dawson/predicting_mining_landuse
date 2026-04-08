@@ -1,6 +1,7 @@
 library(sf)
 library(dplyr)
 library(readxl)
+library(writexl)
 library(rnaturalearth)
 library(rnaturalearthdata)
 library(rnaturalearthhires)
@@ -273,9 +274,41 @@ cat("\nTotal runtime:",
 # ============================================================
 
 summary_df <- do.call(rbind, summary_list)
-write.csv(summary_df,
-          file.path(out_dir, "simulation_summary.csv"),
-          row.names = FALSE)
+
+# Build an overall summary row with means/totals across all sims
+n_pts <- 373
+overall_summary <- data.frame(
+  metric = c("Number of simulations",
+             "Mean total footprint (km2)",
+             "SD total footprint (km2)",
+             "Min total footprint (km2)",
+             "Max total footprint (km2)",
+             "Mean per-mine area (km2)",
+             "Mean original-location per sim",
+             "Original-location rate (%)",
+             "Mean flood-fills per sim",
+             "Flood-fill rate (%)",
+             "Mean fallbacks per sim",
+             "Fallback rate (%)"),
+  value  = c(nrow(summary_df),
+             round(mean(summary_df$total_area_km2), 2),
+             round(sd(summary_df$total_area_km2), 2),
+             round(min(summary_df$total_area_km2), 2),
+             round(max(summary_df$total_area_km2), 2),
+             round(mean(summary_df$mean_area_km2), 2),
+             round(mean(summary_df$n_used_orig), 2),
+             round(mean(summary_df$n_used_orig)/n_pts*100, 2),
+             round(mean(summary_df$n_floodfill), 2),
+             round(mean(summary_df$n_floodfill)/n_pts*100, 2),
+             round(mean(summary_df$n_fallback), 2),
+             round(mean(summary_df$n_fallback)/n_pts*100, 2))
+)
+
+write_xlsx(
+  list(overall_summary = overall_summary,
+       per_simulation  = summary_df),
+  path = file.path(out_dir, "simulation_summary.xlsx")
+)
 
 cat("\n=== SUMMARY ACROSS 125 SIMULATIONS ===\n")
 cat(sprintf("Mean total footprint: %.2f km2 (SD: %.2f)\n",
