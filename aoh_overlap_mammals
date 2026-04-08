@@ -1,7 +1,7 @@
 # =============================================================================
 # Per-simulation mining x AOH overlap — MAMMALS
-# For each sim_XXX.gpkg, computes overlap area (km^2)
-# between simulated mining footprints and every selected species' AOH.
+# For each sim_XXX.gpkg, computes overlap area (km^2) between simulated mining
+# footprints and every selected species' AOH.
 # Updated rasters (modified_[id].tif) take priority, falling back to originals
 # ([id]_1.tif) across the three mammals subfolders.
 # =============================================================================
@@ -81,8 +81,10 @@ sims <- lapply(sim_files, function(f) {
 })
 
 # ---- 5. Per-species overlap across all simulations --------------------------
-# For each species: load its raster once, then loop over simulations
-# accumulating overlap_km2.
+# For each species: load its raster once, then for each simulation clip the
+# mine geometry to the raster's bounding box first. Most range-restricted
+# species short-circuit to 0 against most sims (no mines in their region),
+# avoiding the cost of running crop/mask against the global mine union.
 
 cat("Computing overlap per species x simulation...\n")
 
@@ -98,27 +100,33 @@ for (k in seq_len(n_sp)) {
     cat(sprintf("  Species %d / %d  (species_id: %s)\n", k, n_sp, sid))
   }
 
-  # Accumulator: one overlap value per simulation
   sim_overlap <- setNames(rep(0, length(sims)),
                           vapply(sims, function(sm) as.character(sm$id), character(1)))
 
   tryCatch({
     r <- rast(rpath)
     cell_km2 <- prod(res(r)) / 1e6
+    r_bbox  <- st_as_sfc(st_bbox(r))   # in raster CRS
 
     for (sm in sims) {
       mines_proj <- st_transform(sm$sf, crs(r))
-      v <- vect(mines_proj)
+
+      # Clip mines to raster bbox so only mines that could possibly overlap this species are pushed through crop/mask
+      mines_local <- suppressWarnings(st_intersection(mines_proj, r_bbox))
+      if (length(mines_local) == 0 || all(st_is_empty(mines_local))) {
+        sim_overlap[[as.character(sm$id)]] <- 0
+        next
+      }
 
       ov_km2 <- tryCatch({
+        v  <- vect(mines_local)
         rc <- crop(r, v, snap = "out")
         rm <- mask(rc, v)
         n_habitat <- global(rm > 0, "sum", na.rm = TRUE)[1, 1]
         if (is.na(n_habitat)) 0 else n_habitat * cell_km2
       }, error = function(e) 0)
 
-      key <- as.character(sm$id)
-      sim_overlap[[key]] <- sim_overlap[[key]] + ov_km2
+      sim_overlap[[as.character(sm$id)]] <- ov_km2
     }
   }, error = function(e) {
     cat(sprintf("  WARNING: species %s — %s\n", sid, conditionMessage(e)))
