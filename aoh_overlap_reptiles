@@ -1,0 +1,136 @@
+# =============================================================================
+# Per-simulation mining x AOH overlap — REPTILES
+# For each sim_XXX.gpkg, computes overlap area (km^2)
+# between simulated mining footprints and every selected species' AOH.
+# Updated rasters (modified_[id].tif) take priority, falling back to originals
+# ([id]_1.tif) across the reptiles folder.
+# =============================================================================
+
+library(sf)
+library(terra)
+library(readxl)
+library(dplyr)
+library(tools)
+
+# ---- 1. File paths -----------------------------------------------------------
+
+sim_dir       <- "your-file-path/outputs/simulations"
+species_path  <- "your-file-path/data/species_selection/reptiles_overlap_results.xlsx"
+output_path   <- "your-file-path/outputs/reptiles_sim_overlap.csv"
+
+updated_dir   <- "your-file-path/data/aoh/updated_reptiles"
+original_dirs <- c(
+  "your-file-path/data/aoh/reptiles"
+)
+
+dir.create(dirname(output_path), recursive = TRUE, showWarnings = FALSE)
+
+# ---- 2. Load selected species list ------------------------------------------
+
+cat("Loading selected species list...\n")
+species_df <- read_excel(species_path)
+species_df$species_id <- as.character(species_df$species_id)
+
+# ---- 3. Build AOH lookup: updated priority ----------------------------------
+
+build_lookup <- function(folder, pattern_type = c("updated", "original")) {
+  pattern_type <- match.arg(pattern_type)
+  if (!dir.exists(folder)) return(data.frame(species_id = character(),
+                                              raster_path = character(),
+                                              stringsAsFactors = FALSE))
+  tifs <- list.files(folder, pattern = "\\.tif$", full.names = TRUE,
+                     recursive = FALSE, ignore.case = TRUE)
+  basenames <- file_path_sans_ext(basename(tifs))
+  ids <- if (pattern_type == "updated") sub("^modified_", "", basenames) else sub("_1$", "", basenames)
+  data.frame(species_id = ids, raster_path = tifs, stringsAsFactors = FALSE)
+}
+
+cat("Scanning AOH raster folders...\n")
+updated_lkp  <- build_lookup(updated_dir, "updated")
+original_lkp <- bind_rows(lapply(original_dirs, build_lookup, pattern_type = "original"))
+
+aoh_lookup <- bind_rows(
+  updated_lkp  %>% mutate(source = "updated"),
+  original_lkp %>% mutate(source = "original")
+) %>%
+  distinct(species_id, .keep_all = TRUE)
+
+species_to_check <- species_df %>%
+  inner_join(aoh_lookup, by = "species_id")
+
+cat(sprintf("  Selected species          : %d\n", nrow(species_df)))
+cat(sprintf("  With AOH raster available : %d\n", nrow(species_to_check)))
+cat(sprintf("    updated : %d\n", sum(species_to_check$source == "updated")))
+cat(sprintf("    original: %d\n", sum(species_to_check$source == "original")))
+
+# ---- 4. Load simulation geometries ------------------------------------------
+
+sim_files <- sort(list.files(sim_dir, pattern = "^sim_\\d+\\.gpkg$", full.names = TRUE))
+if (length(sim_files) == 0) stop("No sim_XXX.gpkg files found in ", sim_dir)
+cat(sprintf("Found %d simulation files.\n", length(sim_files)))
+
+cat("Loading simulation geometries...\n")
+sims <- lapply(sim_files, function(f) {
+  s <- st_read(f, quiet = TRUE)
+  list(
+    id = as.integer(sub("^sim_(\\d+)\\.gpkg$", "\\1", basename(f))),
+    sf = st_union(st_geometry(s))
+  )
+})
+
+# ---- 5. Per-species overlap across all simulations --------------------------
+# For each species: load its raster once, then loop over simulations
+# accumulating overlap_km2.
+
+cat("Computing overlap per species x simulation...\n")
+
+results <- vector("list", nrow(species_to_check))
+n_sp <- nrow(species_to_check)
+
+for (k in seq_len(n_sp)) {
+  sid   <- species_to_check$species_id[k]
+  rpath <- species_to_check$raster_path[k]
+  src   <- species_to_check$source[k]
+
+  if (k %% 50 == 0 || k == 1) {
+    cat(sprintf("  Species %d / %d  (species_id: %s)\n", k, n_sp, sid))
+  }
+
+  # Accumulator: one overlap value per simulation
+  sim_overlap <- setNames(rep(0, length(sims)),
+                          vapply(sims, function(sm) as.character(sm$id), character(1)))
+
+  tryCatch({
+    r <- rast(rpath)
+    cell_km2 <- prod(res(r)) / 1e6
+
+    for (sm in sims) {
+      mines_proj <- st_transform(sm$sf, crs(r))
+      v <- vect(mines_proj)
+
+      ov_km2 <- tryCatch({
+        rc <- crop(r, v, snap = "out")
+        rm <- mask(rc, v)
+        n_habitat <- global(rm > 0, "sum", na.rm = TRUE)[1, 1]
+        if (is.na(n_habitat)) 0 else n_habitat * cell_km2
+      }, error = function(e) 0)
+
+      key <- as.character(sm$id)
+      sim_overlap[[key]] <- sim_overlap[[key]] + ov_km2
+    }
+  }, error = function(e) {
+    cat(sprintf("  WARNING: species %s — %s\n", sid, conditionMessage(e)))
+  })
+
+  results[[k]] <- data.frame(
+    simulation  = as.integer(names(sim_overlap)),
+    species_id  = sid,
+    overlap_km2 = unname(sim_overlap),
+    source      = src,
+    stringsAsFactors = FALSE
+  )
+}
+
+out <- bind_rows(results)
+write.csv(out, output_path, row.names = FALSE)
+cat(sprintf("\nDone — wrote %d rows to %s\n", nrow(out), output_path))
