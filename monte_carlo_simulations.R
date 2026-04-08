@@ -10,11 +10,11 @@ library(terra, warn.conflicts = FALSE)
 # PART 1: DATA LOADING & SETUP
 # ============================================================
 
-excel_path <- "your-file-path/S&P_nickel_17022025.xlsx"
+excel_path <- "your-file-path/data/S&P_nickel_17022025.xlsx"
 points_data <- read_excel(excel_path) %>%
   filter(STAGE_AGG == "Exploration") %>%
   filter(DEPOSIT_TYPE %in% c("Laterite", "Magmatic Sulphide")) %>%
-  select(LONGITUDE, LATITUDE, CONTAINED_R_AND_R_PCT_TONNE, DEPOSIT_TYPE) %>%
+  select(PROP_ID, LONGITUDE, LATITUDE, CONTAINED_R_AND_R_PCT_TONNE, DEPOSIT_TYPE) %>%
   mutate(CONTAINED_R_AND_R_PCT_TONNE = as.numeric(CONTAINED_R_AND_R_PCT_TONNE))
 
 # Mollweide for the simulation (equal-area, accurate global distances)
@@ -107,6 +107,7 @@ simulate_one <- function() {
   all_geoms    <- vector("list", n)
   point_info   <- data.frame(
     point_id     = 1:n,
+    PROP_ID      = pts_orig$PROP_ID,
     deposit_type = pts_orig$DEPOSIT_TYPE,
     tonnage      = pts_orig$CONTAINED_R_AND_R_PCT_TONNE,
     ltf          = NA_real_,
@@ -209,6 +210,7 @@ simulate_one <- function() {
   sim_sf <- do.call(rbind, lapply(seq_len(n), function(i) {
     st_sf(
       point_id     = point_info$point_id[i],
+      PROP_ID      = point_info$PROP_ID[i],
       deposit_type = point_info$deposit_type[i],
       tonnage      = point_info$tonnage[i],
       ltf          = point_info$ltf[i],
@@ -225,11 +227,11 @@ simulate_one <- function() {
 }
 
 # ============================================================
-# PART 5: RUN 69 SIMULATIONS, SAVE EACH AS GEOPACKAGE
+# PART 5: RUN 125 SIMULATIONS, SAVE EACH AS GEOPACKAGE
 # ============================================================
 
-n_sims  <- 69
-out_dir <- "your-file-path/simulations"
+n_sims  <- 125
+out_dir <- "your-file-path/outputs/simulations"
 if (!dir.exists(out_dir)) dir.create(out_dir, recursive = TRUE)
 
 cat("Running", n_sims, "simulations and saving to:", out_dir, "\n")
@@ -275,7 +277,7 @@ write.csv(summary_df,
           file.path(out_dir, "simulation_summary.csv"),
           row.names = FALSE)
 
-cat("\n=== SUMMARY ACROSS 69 SIMULATIONS ===\n")
+cat("\n=== SUMMARY ACROSS 125 SIMULATIONS ===\n")
 cat(sprintf("Mean total footprint: %.2f km2 (SD: %.2f)\n",
             mean(summary_df$total_area_km2), sd(summary_df$total_area_km2)))
 cat(sprintf("Range: %.2f - %.2f km2\n",
@@ -304,4 +306,4 @@ cat(sprintf("  Range: %d - %d per simulation\n",
 
 cat("\nAll simulations saved to:", out_dir, "\n")
 cat("Each file is a GeoPackage (.gpkg) in World Behrmann projection.\n")
-cat("File naming: sim_001.gpkg through sim_069.gpkg\n")
+cat("File naming: sim_001.gpkg through sim_125.gpkg\n")
