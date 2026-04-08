@@ -14,12 +14,12 @@ library(tools)
 
 # ---- 1. File paths -----------------------------------------------------------
 
-sim_dir       <- your-file-path/outputs/simulations"
-species_path  <- your-file-path/data/species_selection/reptiles_overlap_results.xlsx"
-output_path   <- your-file-path/outputs/reptiles_sim_overlap.csv"
+sim_dir       <- "your-file-path/outputs/simulations"
+species_path  <- "your-file-path/data/species_selection/reptiles_overlap_results.xlsx"
+output_path   <- "your-file-path/outputs/reptiles_sim_overlap.csv"
 
-updated_dir   <- your-file-path/data/aoh/updated_reptiles"
-original_dirs <- your-file-path/data/aoh/reptiles"
+updated_dir   <- "your-file-path/data/aoh/updated_reptiles"
+original_dirs <- "your-file-path/data/aoh/reptiles"
 
 dir.create(dirname(output_path), recursive = TRUE, showWarnings = FALSE)
 
