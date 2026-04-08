@@ -19,9 +19,7 @@ species_path  <- "your-file-path/data/species_selection/amphibians_overlap_resul
 output_path   <- "your-file-path/outputs/amphibians_sim_overlap.csv"
 
 updated_dir   <- "your-file-path/data/aoh/updated_amphibians"
-original_dirs <- c(
-  "your-file-path/data/aoh/amphibians"
-)
+original_dirs <- "your-file-path/data/aoh/amphibians"
 
 dir.create(dirname(output_path), recursive = TRUE, showWarnings = FALSE)
 
