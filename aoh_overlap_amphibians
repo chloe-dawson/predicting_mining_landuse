@@ -20,18 +20,18 @@ library(dplyr)
 library(tools)
 
 # Send terra temp files to H: drive instead of C:
-terra_tmp <- "H:/scenario_analysis/terra_tmp"
+terra_tmp <- "your-file-path/terra_tmp"
 dir.create(terra_tmp, recursive = TRUE, showWarnings = FALSE)
 terraOptions(tempdir = terra_tmp)
 
 # ---- 1. File paths -----------------------------------------------------------
 
-sim_dir       <- "H:/scenario_analysis/outputs/simulations"
-species_path  <- "H:/scenario_analysis/data/species_selection/amphibians_overlap_results.xlsx"
-output_path   <- "H:/scenario_analysis/outputs/amphibians_per_mine_overlap.csv"
+sim_dir       <- "your-file-path/outputs/simulations"
+species_path  <- "your-file-path/data/species_selection/amphibians_overlap_results.xlsx"
+output_path   <- "your-file-path/outputs/amphibians_per_mine_overlap.csv"
 
-updated_dir   <- "H:/scenario_analysis/data/aoh/updated_amphibians"
-original_dirs <- "H:/scenario_analysis/data/aoh/amphibians"
+updated_dir   <- "your-file-path/data/aoh/updated_amphibians"
+original_dirs <- "your-file-path/data/aoh/amphibians"
 
 dir.create(dirname(output_path), recursive = TRUE, showWarnings = FALSE)
 
@@ -116,8 +116,6 @@ for (k in seq_len(n_sp)) {
   
   sp_rows <- list()
   
-  # Outer try only protects raster loading itself. If the raster file is
-  # missing/corrupt, the species gets no rows at all (and a warning prints).
   raster_loaded <- tryCatch({
     r <- rast(rpath)
     cell_km2 <- prod(res(r)) / 1e6
@@ -182,8 +180,7 @@ for (k in seq_len(n_sp)) {
             }
           }
           
-          # Bbox intersected mines but none actually contained habitat cells —
-          # still record a zero row.
+          # Bbox intersected mines but none actually contained habitat cells — still record a zero row
           if (!sim_had_overlap) {
             out_rows[[length(out_rows) + 1]] <- data.frame(
               simulation  = sm$id,
