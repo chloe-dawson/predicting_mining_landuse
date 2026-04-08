@@ -1,7 +1,14 @@
 # =============================================================================
-# Per-simulation mining x AOH overlap — MAMMALS
-# For each sim_XXX.gpkg, computes overlap area (km^2) between simulated mining
-# footprints and every selected species' AOH.
+# Per-mine mining x AOH overlap — MAMMALS
+# For each sim_XXX.gpkg, computes overlap area (km^2) between EACH individual
+# mine and every selected species' AOH. Mines are NOT unioned, so each mine's
+# standalone habitat impact is recorded — required for scenario toggling
+# (mines on/off based on ore volume thresholds).
+#
+# Note: if two mines physically overlap and both touch a habitat cell, both
+# mines get credit for that cell (intentional double-counting at the per-mine
+# level — see union-level scripts for the deduplicated totals).
+#
 # Updated rasters (modified_[id].tif) take priority, falling back to originals
 # ([id]_1.tif) across the three mammals subfolders.
 # =============================================================================
@@ -12,17 +19,22 @@ library(readxl)
 library(dplyr)
 library(tools)
 
+# Send terra temp files to H: drive instead of C:
+terra_tmp <- "H:/scenario_analysis/terra_tmp"
+dir.create(terra_tmp, recursive = TRUE, showWarnings = FALSE)
+terraOptions(tempdir = terra_tmp)
+
 # ---- 1. File paths -----------------------------------------------------------
 
-sim_dir       <- "your-file-path/outputs/simulations"
-species_path  <- "your-file-path/data/species_selection/mammals_overlap_results.xlsx"
-output_path   <- "your-file-path/outputs/mammals_sim_overlap.csv"
+sim_dir       <- "H:/scenario_analysis/outputs/simulations"
+species_path  <- "H:/scenario_analysis/data/species_selection/mammals_overlap_results.xlsx"
+output_path   <- "H:/scenario_analysis/outputs/mammals_per_mine_overlap.csv"
 
-updated_dir   <- "your-file-path/data/aoh/updated_mammals"
+updated_dir   <- "H:/scenario_analysis/data/aoh/updated_mammals"
 original_dirs <- c(
-  "your-file-path/data/aoh/mammals/freshwater",
-  "your-file-path/data/aoh/mammals/marine_and_terrestrial",
-  "your-file-path/data/aoh/mammals/terrestrial_only"
+  "H:/scenario_analysis/data/aoh/mammals/freshwater",
+  "H:/scenario_analysis/data/aoh/mammals/marine_and_terrestrial",
+  "H:/scenario_analysis/data/aoh/mammals/terrestrial_only"
 )
 
 dir.create(dirname(output_path), recursive = TRUE, showWarnings = FALSE)
@@ -65,28 +77,35 @@ cat(sprintf("  With AOH raster available : %d\n", nrow(species_to_check)))
 cat(sprintf("    updated : %d\n", sum(species_to_check$source == "updated")))
 cat(sprintf("    original: %d\n", sum(species_to_check$source == "original")))
 
-# ---- 4. Load simulation geometries ------------------------------------------
+# ---- 4. Load simulations as INDIVIDUAL mines (not unioned) ------------------
+# Each sim is loaded as the full sf object so we keep per-mine attributes
+# (point_id, PROP_ID) for the per-mine attribution.
 
 sim_files <- sort(list.files(sim_dir, pattern = "^sim_\\d+\\.gpkg$", full.names = TRUE))
 if (length(sim_files) == 0) stop("No sim_XXX.gpkg files found in ", sim_dir)
 cat(sprintf("Found %d simulation files.\n", length(sim_files)))
 
-cat("Loading simulation geometries...\n")
+cat("Loading simulation geometries (per-mine, not unioned)...\n")
 sims <- lapply(sim_files, function(f) {
   s <- st_read(f, quiet = TRUE)
   list(
     id = as.integer(sub("^sim_(\\d+)\\.gpkg$", "\\1", basename(f))),
-    sf = st_union(st_geometry(s))
+    sf = s   # keep full sf with point_id + PROP_ID
   )
 })
 
-# ---- 5. Per-species overlap across all simulations --------------------------
-# For each species: load its raster once, then for each simulation clip the
-# mine geometry to the raster's bounding box first. Most range-restricted
-# species short-circuit to 0 against most sims (no mines in their region),
-# avoiding the cost of running crop/mask against the global mine union.
+# ---- 5. Per-species, per-mine overlap ---------------------------------------
+# For each species:
+#   1. Load raster, compute cell area, get raster bbox
+#   2. For each sim, intersect the mine geometry with the species' bbox to
+#      get only the candidate mines 
+#   3. For each candidate mine, run crop/mask/global on its OWN geometry
+#      and record one row (sim, species, point_id, PROP_ID, overlap_km2)
+# Species with no overlap against any mine in a sim contribute one zero
+# row per sim (point_id and PROP_ID set to NA), so every species has at
+# least one row per simulation for downstream summary stats.
 
-cat("Computing overlap per species x simulation...\n")
+cat("Computing per-mine overlap per species x simulation...\n")
 
 results <- vector("list", nrow(species_to_check))
 n_sp <- nrow(species_to_check)
@@ -100,8 +119,7 @@ for (k in seq_len(n_sp)) {
     cat(sprintf("  Species %d / %d  (species_id: %s)\n", k, n_sp, sid))
   }
 
-  sim_overlap <- setNames(rep(0, length(sims)),
-                          vapply(sims, function(sm) as.character(sm$id), character(1)))
+  sp_rows <- list()
 
   tryCatch({
     r <- rast(rpath)
@@ -111,36 +129,79 @@ for (k in seq_len(n_sp)) {
     for (sm in sims) {
       mines_proj <- st_transform(sm$sf, crs(r))
 
-      # Clip mines to raster bbox so only mines that could possibly overlap this species are pushed through crop/mask
-      mines_local <- suppressWarnings(st_intersection(mines_proj, r_bbox))
-      if (length(mines_local) == 0 || all(st_is_empty(mines_local))) {
-        sim_overlap[[as.character(sm$id)]] <- 0
+      # Spatial filter: only mines whose geometry intersects the raster bbox
+      hits <- suppressWarnings(st_intersects(mines_proj, r_bbox, sparse = FALSE)[, 1])
+
+      if (!any(hits)) {
+        # No candidate mines this sim — record one zero row so the species has a complete per-sim record for downstream stats.
+        sp_rows[[length(sp_rows) + 1]] <- data.frame(
+          simulation  = sm$id,
+          species_id  = sid,
+          point_id    = NA_integer_,
+          PROP_ID     = NA,
+          overlap_km2 = 0,
+          source      = src,
+          stringsAsFactors = FALSE
+        )
         next
       }
 
-      ov_km2 <- tryCatch({
-        v  <- vect(mines_local)
-        rc <- crop(r, v, snap = "out")
-        rm <- mask(rc, v)
-        n_habitat <- global(rm > 0, "sum", na.rm = TRUE)[1, 1]
-        if (is.na(n_habitat)) 0 else n_habitat * cell_km2
-      }, error = function(e) 0)
+      candidate_mines <- mines_proj[hits, ]
+      sim_had_overlap <- FALSE
 
-      sim_overlap[[as.character(sm$id)]] <- ov_km2
+      for (m in seq_len(nrow(candidate_mines))) {
+        mine    <- candidate_mines[m, ]
+        pid     <- mine$point_id
+        prop_id <- mine$PROP_ID
+
+        ov_km2 <- tryCatch({
+          v  <- vect(mine)
+          rc <- crop(r, v, snap = "out")
+          rm <- mask(rc, v)
+          n_habitat <- global(rm > 0, "sum", na.rm = TRUE)[1, 1]
+          if (is.na(n_habitat)) 0 else n_habitat * cell_km2
+        }, error = function(e) 0)
+
+        if (ov_km2 > 0) {
+          sim_had_overlap <- TRUE
+          sp_rows[[length(sp_rows) + 1]] <- data.frame(
+            simulation  = sm$id,
+            species_id  = sid,
+            point_id    = pid,
+            PROP_ID     = prop_id,
+            overlap_km2 = ov_km2,
+            source      = src,
+            stringsAsFactors = FALSE
+          )
+        }
+      }
+
+      # Bbox intersected mines but none actually contained habitat cells — still record a zero row
+      if (!sim_had_overlap) {
+        sp_rows[[length(sp_rows) + 1]] <- data.frame(
+          simulation  = sm$id,
+          species_id  = sid,
+          point_id    = NA_integer_,
+          PROP_ID     = NA,
+          overlap_km2 = 0,
+          source      = src,
+          stringsAsFactors = FALSE
+        )
+      }
     }
   }, error = function(e) {
     cat(sprintf("  WARNING: species %s — %s\n", sid, conditionMessage(e)))
   })
 
-  results[[k]] <- data.frame(
-    simulation  = as.integer(names(sim_overlap)),
-    species_id  = sid,
-    overlap_km2 = unname(sim_overlap),
-    source      = src,
-    stringsAsFactors = FALSE
-  )
+  if (length(sp_rows) > 0) {
+    results[[k]] <- bind_rows(sp_rows)
+  }
 }
 
 out <- bind_rows(results)
 write.csv(out, output_path, row.names = FALSE)
 cat(sprintf("\nDone — wrote %d rows to %s\n", nrow(out), output_path))
+cat(sprintf("Unique species with non-zero overlap: %d\n",
+            length(unique(out$species_id[out$overlap_km2 > 0]))))
+cat(sprintf("Unique mines responsible for habitat loss: %d\n",
+            length(unique(out$PROP_ID[!is.na(out$PROP_ID)]))))
