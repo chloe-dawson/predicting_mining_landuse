@@ -1,3 +1,18 @@
+# =============================================================================
+# Per-mine mining x AOH overlap — AMPHIBIANS
+# For each sim_XXX.gpkg, computes overlap area (km^2) between EACH individual
+# mine and every selected species' AOH. Mines are NOT unioned, so each mine's
+# standalone habitat impact is recorded — required for scenario toggling
+# (mines on/off based on ore volume thresholds).
+#
+# Note: if two mines physically overlap and both touch a habitat cell, both
+# mines get credit for that cell (intentional double-counting at the per-mine
+# level — see union-level scripts for the deduplicated totals).
+#
+# Updated rasters (modified_[id].tif) take priority, falling back to originals
+# ([id]_1.tif) across the amphibians folder.
+# =============================================================================
+
 library(sf)
 library(terra)
 library(readxl)
@@ -5,7 +20,8 @@ library(dplyr)
 library(tools)
 
 # Send terra temp files to H: drive instead of C:
-terra_tmp <- "your-file-path/terra_tmp" 
+terra_tmp <- "your-file-path/terra_tmp"
+dir.create(terra_tmp, recursive = TRUE, showWarnings = FALSE)
 terraOptions(tempdir = terra_tmp)
 
 # ---- 1. File paths -----------------------------------------------------------
@@ -15,9 +31,7 @@ species_path  <- "your-file-path/data/species_selection/amphibians_overlap_resul
 output_path   <- "your-file-path/outputs/amphibians_per_mine_overlap.csv"
 
 updated_dir   <- "your-file-path/data/aoh/updated_amphibians"
-original_dirs <- c(
-  "your-file-path/data/aoh/amphibians"
-)
+original_dirs <- "your-file-path/data/aoh/amphibians"
 
 dir.create(dirname(output_path), recursive = TRUE, showWarnings = FALSE)
 
@@ -80,11 +94,12 @@ sims <- lapply(sim_files, function(f) {
 # For each species:
 #   1. Load raster, compute cell area, get raster bbox
 #   2. For each sim, intersect the mine geometry with the species' bbox to
-#      get only the candidate mines (most species have 0-5 candidates)
+#      get only the candidate mines  
 #   3. For each candidate mine, run crop/mask/global on its OWN geometry
 #      and record one row (sim, species, point_id, PROP_ID, overlap_km2)
-# Species with no overlap against any mine in a sim contribute zero rows
-# for that sim (avoids exploding the output to millions of zero rows).
+# Species with no overlap against any mine in a sim contribute one zero
+# row per sim (point_id and PROP_ID set to NA), so every species has at
+# least one row per simulation for downstream summary stats.
 
 cat("Computing per-mine overlap per species x simulation...\n")
 
@@ -114,7 +129,7 @@ for (k in seq_len(n_sp)) {
       hits <- suppressWarnings(st_intersects(mines_proj, r_bbox, sparse = FALSE)[, 1])
       
       if (!any(hits)) {
-        # No candidate mines this sim — record one zero row so the species 
+        # No candidate mines this sim — record one zero row so the species has a complete per-sim record for downstream stats
         sp_rows[[length(sp_rows) + 1]] <- data.frame(
           simulation  = sm$id,
           species_id  = sid,
@@ -157,8 +172,7 @@ for (k in seq_len(n_sp)) {
         }
       }
       
-      # Bbox intersected mines but none actually contained habitat cells —
-      # still record a zero row.
+      # Bbox intersected mines but none actually contained habitat cells — still record a zero row.
       if (!sim_had_overlap) {
         sp_rows[[length(sp_rows) + 1]] <- data.frame(
           simulation  = sm$id,
@@ -183,5 +197,7 @@ for (k in seq_len(n_sp)) {
 out <- bind_rows(results)
 write.csv(out, output_path, row.names = FALSE)
 cat(sprintf("\nDone — wrote %d rows to %s\n", nrow(out), output_path))
-cat(sprintf("Unique species with non-zero overlap: %d\n", length(unique(out$species_id))))
-cat(sprintf("Unique mines responsible for habitat loss: %d\n", length(unique(out$PROP_ID))))
+cat(sprintf("Unique species with non-zero overlap: %d\n",
+            length(unique(out$species_id[out$overlap_km2 > 0]))))
+cat(sprintf("Unique mines responsible for habitat loss: %d\n",
+            length(unique(out$PROP_ID[!is.na(out$PROP_ID)]))))
