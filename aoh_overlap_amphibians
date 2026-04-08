@@ -21,7 +21,6 @@ library(tools)
 
 # Send terra temp files to H: drive instead of C:
 terra_tmp <- "your-file-path/terra_tmp"
-dir.create(terra_tmp, recursive = TRUE, showWarnings = FALSE)
 terraOptions(tempdir = terra_tmp)
 
 # ---- 1. File paths -----------------------------------------------------------
@@ -74,8 +73,7 @@ cat(sprintf("    updated : %d\n", sum(species_to_check$source == "updated")))
 cat(sprintf("    original: %d\n", sum(species_to_check$source == "original")))
 
 # ---- 4. Load simulations as INDIVIDUAL mines (not unioned) ------------------
-# Each sim is loaded as the full sf object so we keep per-mine attributes
-# (point_id, PROP_ID) for the per-mine attribution.
+# Each sim is loaded as the full sf object so we keep per-mine attributes (point_id, PROP_ID) for the per-mine attribution
 
 sim_files <- sort(list.files(sim_dir, pattern = "^sim_\\d+\\.gpkg$", full.names = TRUE))
 if (length(sim_files) == 0) stop("No sim_XXX.gpkg files found in ", sim_dir)
