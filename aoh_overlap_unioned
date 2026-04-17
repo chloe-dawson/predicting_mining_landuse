@@ -1,0 +1,217 @@
+# =============================================================================
+# Per-species AOH change — UNIONED MINES 
+# Mines within a simulation are dissolved into a single geometry before
+# overlap is computed, so overlapping mines don't double-count habitat
+# Output: one row per species x simulation with:
+#   original_aoh_km2   – total species AOH
+#   overlap_km2        – overlap between unioned mine footprint and AOH
+#   final_aoh_km2      – original minus overlap
+# =============================================================================
+
+library(sf)
+library(terra)
+library(readr)
+library(readxl)
+library(dplyr)
+library(tools)
+
+# Route terra temp files to H:
+terra_tmp <- "your-file-path/terra_tmp"
+dir.create(terra_tmp, recursive = TRUE, showWarnings = FALSE)
+terraOptions(tempdir = terra_tmp)
+
+# ---- CHOOSE TAXON -----------------------------------------------------------
+# Set to: "amphibians", "reptiles", "mammals", or "birds"
+taxon <- "birds"
+
+# ---- Paths ------------------------------------------------------------------
+
+sim_dir      <- "your-file-path/outputs/simulations"
+per_mine_csv <- file.path("your-file-path/outputs",
+                          paste0(taxon, "_per_mine_overlap.csv"))
+output_path  <- file.path("your-file-path/outputs",
+                          paste0(taxon, "_aoh_change_unioned.csv"))
+
+# ---- Build species_id -> list of raster paths -------------------------------
+
+scan_folder <- function(folder, naming) {
+  if (!dir.exists(folder)) return(data.frame(species_id = character(),
+                                             raster_path = character(),
+                                             stringsAsFactors = FALSE))
+  tifs <- list.files(folder, pattern = "\\.tif$", full.names = TRUE,
+                     ignore.case = TRUE)
+  bn <- file_path_sans_ext(basename(tifs))
+  ids <- switch(naming,
+                "updated" = sub("^modified_", "", bn),
+                "single"  = sub("_1$", "", bn),
+                "bird"    = sub("_[0-9]+$", "", bn))
+  data.frame(species_id = ids, raster_path = tifs, stringsAsFactors = FALSE)
+}
+
+cat(sprintf("Taxon: %s\n", taxon))
+cat("Building AOH lookup...\n")
+
+if (taxon == "birds") {
+  aoh_dirs <- c(
+    "your-file-path/data/aoh/birds/BOTW_2023_1-part-1",
+    "your-file-path/data/aoh/birds/BOTW_2023_1-part-2",
+    "your-file-path/data/aoh/birds/BOTW_2023_1-part-3",
+    "your-file-path/data/aoh/birds/BOTW_2023_1-part-4",
+    "your-file-path/data/aoh/birds/BOTW_2023_1-part-5",
+    "your-file-path/data/aoh/birds/BOTW_2023_1-part-6"
+  )
+  lkp <- bind_rows(lapply(aoh_dirs, scan_folder, naming = "bird"))
+  aoh_lookup <- lkp %>%
+    group_by(species_id) %>%
+    summarise(raster_paths = list(raster_path), .groups = "drop")
+  
+} else {
+  if (taxon == "amphibians") {
+    updated_dir   <- "your-file-path/data/aoh/updated_amphibians"
+    original_dirs <- "your-file-path/data/aoh/amphibians"
+  } else if (taxon == "reptiles") {
+    updated_dir   <- "your-file-path/data/aoh/updated_reptiles"
+    original_dirs <- "your-file-path/data/aoh/reptiles"
+  } else if (taxon == "mammals") {
+    updated_dir   <- "your-file-path/data/aoh/updated_mammals"
+    original_dirs <- c(
+      "your-file-path/data/aoh/mammals/freshwater",
+      "your-file-path/data/aoh/mammals/marine_and_terrestrial",
+      "your-file-path/data/aoh/mammals/terrestrial_only"
+    )
+  } else stop("Unknown taxon: ", taxon)
+  
+  upd_df  <- scan_folder(updated_dir, "updated")
+  orig_df <- bind_rows(lapply(original_dirs, scan_folder, naming = "single"))
+  
+  combined <- bind_rows(
+    upd_df  %>% mutate(priority = 1),
+    orig_df %>% mutate(priority = 2)
+  ) %>%
+    arrange(species_id, priority) %>%
+    distinct(species_id, .keep_all = TRUE)
+  
+  aoh_lookup <- combined %>%
+    group_by(species_id) %>%
+    summarise(raster_paths = list(raster_path), .groups = "drop")
+}
+
+cat(sprintf("  Species with AOH rasters: %d\n", nrow(aoh_lookup)))
+
+# ---- Species list: only those with overlap in per-mine analysis -------------
+
+cat("Loading per-mine overlap CSV to get species list...\n")
+pm <- read_csv(per_mine_csv, show_col_types = FALSE)
+pm$species_id <- as.character(pm$species_id)
+
+species_ids <- pm %>%
+  filter(overlap_km2 > 0) %>%
+  pull(species_id) %>%
+  unique()
+
+cat(sprintf("  Species to process: %d\n", length(species_ids)))
+
+# ---- Load & union mines per simulation --------------------------------------
+
+cat("Loading and unioning simulation geometries...\n")
+sim_files <- sort(list.files(sim_dir, pattern = "^sim_\\d+\\.gpkg$",
+                             full.names = TRUE))
+if (length(sim_files) == 0) stop("No sim_XXX.gpkg files found in ", sim_dir)
+cat(sprintf("  Found %d simulations.\n", length(sim_files)))
+
+sims <- lapply(sim_files, function(f) {
+  s <- st_read(f, quiet = TRUE)
+  list(
+    id    = as.integer(sub("^sim_(\\d+)\\.gpkg$", "\\1", basename(f))),
+    union = st_union(st_geometry(s))   # dissolve all mines into one geometry
+  )
+})
+cat("  Done.\n")
+
+# ---- Compute original AOH + overlap per species x simulation ----------------
+
+cat("Computing original AOH and unioned overlap...\n")
+
+lookup_idx <- setNames(seq_len(nrow(aoh_lookup)), aoh_lookup$species_id)
+results <- vector("list", length(species_ids))
+
+start_time <- Sys.time()
+
+for (i in seq_along(species_ids)) {
+  sid <- species_ids[i]
+  
+  if (i %% 50 == 0 || i == 1) {
+    elapsed <- round(as.numeric(difftime(Sys.time(), start_time, units = "mins")), 2)
+    cat(sprintf("  %d / %d (%s)  [%.2f min]\n",
+                i, length(species_ids), sid, elapsed))
+  }
+  
+  idx <- lookup_idx[sid]
+  if (is.na(idx)) next
+  
+  rpaths <- aoh_lookup$raster_paths[[idx]]
+  
+  tryCatch({
+    # Mosaic tifs for birds (union of habitat across seasonal layers)
+    rasters <- lapply(rpaths, rast)
+    r <- if (length(rasters) == 1) rasters[[1]] else
+      do.call(terra::mosaic, c(rasters, list(fun = "max")))
+    
+    cell_km2  <- prod(res(r)) / 1e6
+    n_habitat <- global(r > 0, "sum", na.rm = TRUE)[1, 1]
+    original_aoh_km2 <- if (is.na(n_habitat)) 0 else n_habitat * cell_km2
+    
+    # Raster bbox as sf for fast spatial filtering
+    r_bbox <- st_as_sfc(st_bbox(r))
+    
+    sp_rows <- vector("list", length(sims))
+    
+    for (j in seq_along(sims)) {
+      sm <- sims[[j]]
+      
+      ov_km2 <- tryCatch({
+        # Reproject unioned mines to raster CRS
+        mines_proj <- st_transform(sm$union, crs(r))
+        
+        # Quick check: does the union touch the AOH bbox at all?
+        if (!any(suppressWarnings(st_intersects(mines_proj, r_bbox,
+                                                sparse = FALSE)))) {
+          0
+        } else {
+          # Crop unioned mines to AOH bbox so the raster crop stays local
+          mines_local <- suppressWarnings(st_intersection(mines_proj, r_bbox))
+          
+          if (length(st_geometry(mines_local)) == 0) {
+            0
+          } else {
+            v  <- vect(mines_local)
+            rc <- crop(r, v, snap = "out")
+            rm <- mask(rc, v)
+            n_overlap <- global(rm > 0, "sum", na.rm = TRUE)[1, 1]
+            if (is.na(n_overlap)) 0 else n_overlap * cell_km2
+          }
+        }
+      }, error = function(e) 0)
+      
+      sp_rows[[j]] <- data.frame(
+        simulation        = sm$id,
+        species_id        = sid,
+        original_aoh_km2  = original_aoh_km2,
+        overlap_km2       = ov_km2,
+        final_aoh_km2     = original_aoh_km2 - ov_km2,
+        stringsAsFactors  = FALSE
+      )
+    }
+    
+    results[[i]] <- bind_rows(sp_rows)
+  }, error = function(e) {
+    cat(sprintf("  WARNING: species %s - %s\n", sid, conditionMessage(e)))
+  })
+}
+
+out <- bind_rows(results)
+write_csv(out, output_path)
+
+total_time <- round(as.numeric(difftime(Sys.time(), start_time, units = "mins")), 2)
+cat(sprintf("\nDone in %.2f min — wrote %d rows to %s\n",
+            total_time, nrow(out), output_path))
