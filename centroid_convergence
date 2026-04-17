@@ -1,0 +1,322 @@
+library(sf)
+library(dplyr)
+library(readxl)
+library(writexl)
+library(rnaturalearth)
+library(rnaturalearthdata)
+library(rnaturalearthhires)
+library(terra, warn.conflicts = FALSE)
+
+# ============================================================
+# PART 1: DATA LOADING & SETUP
+# ============================================================
+
+excel_path <- "your-file-path/data/S&P_nickel_17022025.xlsx"
+points_data <- read_excel(excel_path) %>%
+  filter(STAGE_AGG == "Exploration") %>%
+  filter(DEPOSIT_TYPE %in% c("Laterite", "Magmatic Sulphide")) %>%
+  select(LONGITUDE, LATITUDE, CONTAINED_R_AND_R_PCT_TONNE, DEPOSIT_TYPE) %>%
+  mutate(CONTAINED_R_AND_R_PCT_TONNE = as.numeric(CONTAINED_R_AND_R_PCT_TONNE))
+
+crs_moll <- "+proj=moll +lon_0=0 +datum=WGS84 +units=m +no_defs"
+pts_orig <- st_as_sf(points_data,
+                     coords = c("LONGITUDE", "LATITUDE"),
+                     crs = 4326) %>%
+  st_transform(crs = crs_moll)
+
+land_union <- ne_countries(scale = "large", returnclass = "sf") %>%
+  st_transform(crs = crs_moll) %>%
+  st_union()
+
+cat("Pre-clipping land to mining regions...\n")
+all_pts_buf <- st_buffer(st_union(st_geometry(pts_orig)), dist = 100000)
+land_clipped <- st_intersection(land_union, all_pts_buf)
+cat("Done.\n")
+
+# ============================================================
+# PART 2: DEPOSIT-TYPE PARAMETERS
+# ============================================================
+
+ltf_params <- list(
+  "Magmatic Sulphide" = list(median = 30, min = 4, max = 398, log_sd = 1.39),
+  "Laterite"          = list(median = 50, min = 7, max = 229, log_sd = 0.99)
+)
+
+mine_size_caps <- list(
+  "Magmatic Sulphide" = list(min_area = 0.40e6, max_area = 79.45e6),
+  "Laterite"          = list(min_area = 2.73e6, max_area = 70.96e6)
+)
+
+# ============================================================
+# PART 3: FLOOD-FILL FUNCTION
+# ============================================================
+
+fill_mine_area <- function(shifted_point, need_cells, land_rast) {
+  seed <- cellFromXY(land_rast, sf::st_coordinates(shifted_point))
+  vals <- values(land_rast)
+  ncells_total <- ncell(land_rast)
+  if (is.na(seed) || seed < 1 || seed > ncells_total || vals[seed] == 0) return(integer(0))
+
+  region <- integer(0)
+  queue  <- seed
+
+  while (length(region) < need_cells && length(queue) > 0) {
+    cell <- queue[1]; queue <- queue[-1]
+    if (cell %in% region) next
+    if (is.na(cell) || cell < 1 || cell > ncells_total) next
+    xy_check <- xyFromCell(land_rast, cell)
+    if (any(is.na(xy_check))) next
+    region <- c(region, cell)
+    nbs   <- terra::adjacent(land_rast, cells = cell,
+                             directions = 8, pairs = FALSE)
+    nbs   <- nbs[!is.na(nbs)]
+    keeps <- nbs[nbs >= 1 & nbs <= ncells_total & !is.na(vals[nbs]) & vals[nbs] == 1]
+    newq  <- setdiff(keeps, c(region, queue))
+    queue <- c(queue, newq)
+  }
+  head(region, need_cells)
+}
+
+# ============================================================
+# HELPER: safe geometry checks
+# ============================================================
+
+safe_intersection <- function(x, y) {
+  tryCatch(st_intersection(x, y), error = function(e) NULL)
+}
+
+safe_is_usable <- function(geom) {
+  if (is.null(geom)) return(FALSE)
+  if (length(geom) == 0) return(FALSE)
+  tryCatch({ !all(st_is_empty(geom)) }, error = function(e) FALSE)
+}
+
+safe_area <- function(geom) {
+  tryCatch({ as.numeric(st_area(st_union(geom))) }, error = function(e) 0)
+}
+
+# ============================================================
+# PART 4: SIMULATION FUNCTION - RETURNS PER-MINE CENTROIDS
+# ============================================================
+
+simulate_per_mine <- function() {
+  n <- nrow(pts_orig)
+  centroids <- matrix(NA_real_, nrow = n, ncol = 2)
+  colnames(centroids) <- c("x", "y")
+  max_shift <- 15000
+
+  for (i in seq_len(n)) {
+    orig_pt   <- st_geometry(pts_orig[i, ])
+    dep_type  <- pts_orig$DEPOSIT_TYPE[i]
+    tonnage   <- pts_orig$CONTAINED_R_AND_R_PCT_TONNE[i]
+    params    <- ltf_params[[dep_type]]
+    caps      <- mine_size_caps[[dep_type]]
+
+    shifted <- NULL
+    for (attempt in 1:50) {
+      dx <- runif(1, -max_shift, max_shift)
+      dy <- runif(1, -max_shift, max_shift)
+      candidate <- orig_pt + c(dx, dy)
+      st_crs(candidate) <- crs_moll
+      hit <- tryCatch(
+        as.numeric(st_intersects(candidate, land_clipped, sparse = FALSE)),
+        error = function(e) 0
+      )
+      if (!is.na(hit) && hit > 0) {
+        shifted <- candidate
+        break
+      }
+    }
+    if (is.null(shifted)) shifted <- orig_pt
+
+    ltf_raw <- rlnorm(1, meanlog = log(params$median), sdlog = params$log_sd)
+    ltf     <- max(params$min, min(params$max, ltf_raw))
+    target_area <- ltf * tonnage
+    target_area <- max(caps$min_area, min(caps$max_area, target_area))
+
+    buffer_radius <- sqrt(target_area / pi)
+    raw_buffer    <- st_buffer(shifted, dist = buffer_radius)
+    land_buffer   <- safe_intersection(raw_buffer, land_clipped)
+    lb_area <- if (safe_is_usable(land_buffer)) safe_area(land_buffer) else 0
+
+    mine_geom <- NULL
+    if (lb_area >= caps$min_area) {
+      mine_geom <- land_buffer
+    } else {
+      cell_size_ff <- 100
+      need_cells   <- ceiling(target_area / (cell_size_ff^2))
+      bbox_buf     <- st_buffer(shifted, dist = buffer_radius * 2)
+      land_clip    <- safe_intersection(bbox_buf, land_clipped)
+
+      if (safe_is_usable(land_clip)) {
+        r <- tryCatch({
+          rr <- rast(ext(st_bbox(land_clip)), res = cell_size_ff, crs = crs_moll)
+          rasterize(vect(land_clip), rr, field = 1, background = 0)
+        }, error = function(e) NULL)
+
+        filled <- if (!is.null(r)) fill_mine_area(shifted, need_cells, r) else integer(0)
+
+        if (length(filled) > 0) {
+          filled_rast <- r
+          values(filled_rast) <- NA
+          filled_rast[filled] <- 1
+          filled_poly <- as.polygons(filled_rast, dissolve = TRUE)
+          filled_sf   <- st_as_sf(filled_poly)
+          st_crs(filled_sf) <- crs_moll
+          mine_geom <- st_geometry(filled_sf)
+        } else {
+          fallback_radius <- sqrt(caps$min_area / pi)
+          mine_geom <- st_buffer(shifted, dist = fallback_radius)
+        }
+      } else {
+        fallback_radius <- sqrt(caps$min_area / pi)
+        mine_geom <- st_buffer(shifted, dist = fallback_radius)
+      }
+    }
+
+    coords <- tryCatch({
+      st_coordinates(st_centroid(st_union(mine_geom)))
+    }, error = function(e) matrix(c(NA, NA), ncol = 2))
+    centroids[i, ] <- coords[1, ]
+  }
+
+  centroids
+}
+
+# ============================================================
+# PART 5: RUN 1000 PILOT SIMULATIONS
+# ============================================================
+
+pilot_n <- 1000
+n_pts   <- nrow(pts_orig)
+cat("=== PER-MINE CENTROID CONVERGENCE PILOT ===\n")
+cat("Running", pilot_n, "pilot simulations...\n")
+cat("Number of mines:", n_pts, "\n")
+cat("Start time:", format(Sys.time(), "%Y-%m-%d %H:%M:%S"), "\n\n")
+
+# Store all centroid coordinates: n_sims x n_mines x 2 (x, y)
+centroid_x_mat <- matrix(NA_real_, nrow = pilot_n, ncol = n_pts)
+centroid_y_mat <- matrix(NA_real_, nrow = pilot_n, ncol = n_pts)
+
+start_time <- Sys.time()
+
+for (s in seq_len(pilot_n)) {
+  cs <- simulate_per_mine()
+  centroid_x_mat[s, ] <- cs[, 1]
+  centroid_y_mat[s, ] <- cs[, 2]
+
+  if (s %% 50 == 0) {
+    elapsed <- difftime(Sys.time(), start_time, units = "mins")
+    cat(sprintf("  Sim %d/%d complete (%.1f min elapsed)\n",
+                s, pilot_n, as.numeric(elapsed)))
+  }
+}
+
+end_time <- Sys.time()
+cat("Total runtime:",
+    round(difftime(end_time, start_time, units = "hours"), 2), "hours\n\n")
+
+# ============================================================
+# PART 6: CALCULATE CUMULATIVE MEAN CENTROIDS
+# ============================================================
+
+# For each mine, compute the cumulative mean centroid at each snapshot point
+# Then compute the distance between successive cumulative means
+
+# Check convergence at these snapshot points
+snapshot_points <- c(seq(25, 200, by = 25),
+                     seq(250, 500, by = 50),
+                     seq(600, 1000, by = 100))
+
+# For each mine, track how the cumulative mean centroid moves
+# Storage: snapshot_points x n_pts (distance moved between successive snapshots, metres)
+movement_mat <- matrix(NA_real_,
+                       nrow = length(snapshot_points),
+                       ncol = n_pts)
+
+prev_mean_x <- NULL
+prev_mean_y <- NULL
+
+for (idx in seq_along(snapshot_points)) {
+  s <- snapshot_points[idx]
+  # Cumulative mean centroid across first s sims
+  cum_mean_x <- colMeans(centroid_x_mat[1:s, , drop = FALSE], na.rm = TRUE)
+  cum_mean_y <- colMeans(centroid_y_mat[1:s, , drop = FALSE], na.rm = TRUE)
+
+  if (!is.null(prev_mean_x)) {
+    # Distance each mine's cumulative mean moved since the last snapshot
+    dist_moved <- sqrt((cum_mean_x - prev_mean_x)^2 +
+                       (cum_mean_y - prev_mean_y)^2)
+    movement_mat[idx, ] <- dist_moved
+  }
+
+  prev_mean_x <- cum_mean_x
+  prev_mean_y <- cum_mean_y
+}
+
+# ============================================================
+# PART 7: ANALYSE CONVERGENCE
+# ============================================================
+
+# Convergence thresholds in metres
+thresholds <- c(50, 100, 200, 500, 1000)
+
+cat("=== CENTROID CONVERGENCE RESULTS ===\n")
+cat("At each snapshot, how far each mine's cumulative mean centroid moved\n")
+cat("since the previous snapshot.\n\n")
+
+convergence_summary <- data.frame(
+  n_sims      = snapshot_points,
+  mean_move_m = apply(movement_mat, 1, mean, na.rm = TRUE),
+  median_move_m = apply(movement_mat, 1, median, na.rm = TRUE),
+  p95_move_m  = apply(movement_mat, 1, quantile, probs = 0.95, na.rm = TRUE),
+  max_move_m  = apply(movement_mat, 1, max, na.rm = TRUE)
+)
+
+print(convergence_summary)
+
+# Find simulation count where 95% of mines have stabilised at each threshold
+cat("\n=== RECOMMENDED SIMULATION COUNTS ===\n")
+cat("(Where 95% of mines have mean centroid stable within threshold)\n\n")
+
+for (thresh in thresholds) {
+  # For each snapshot, what fraction of mines have moved less than the threshold?
+  stable_fraction <- apply(movement_mat, 1, function(row) {
+    mean(row < thresh, na.rm = TRUE)
+  })
+  # First snapshot where 95% of mines are stable
+  stable_idx <- which(stable_fraction >= 0.95)
+  if (length(stable_idx) > 0) {
+    cat(sprintf("  Threshold %d m: 95%% of mines stable by n = %d\n",
+                thresh, snapshot_points[stable_idx[1]]))
+  } else {
+    cat(sprintf("  Threshold %d m: not reached within %d simulations\n",
+                thresh, pilot_n))
+  }
+}
+
+# ============================================================
+# PART 8: SAVE RESULTS
+# ============================================================
+
+# Per-mine final stats
+per_mine_final <- data.frame(
+  point_id      = seq_len(n_pts),
+  deposit_type  = pts_orig$DEPOSIT_TYPE,
+  tonnage       = pts_orig$CONTAINED_R_AND_R_PCT_TONNE,
+  final_mean_x  = colMeans(centroid_x_mat, na.rm = TRUE),
+  final_mean_y  = colMeans(centroid_y_mat, na.rm = TRUE),
+  centroid_sd_x = apply(centroid_x_mat, 2, sd, na.rm = TRUE),
+  centroid_sd_y = apply(centroid_y_mat, 2, sd, na.rm = TRUE)
+)
+
+write_xlsx(
+  list(convergence_by_snapshot = convergence_summary,
+       per_mine_final_stats    = per_mine_final),
+  path = "your-file-path/outputs/centroid_convergence_results.xlsx"
+)
+
+cat("Saved: centroid_convergence_results.xlsx\n")
+cat("\nDone.\n")
+cat("Use the convergence table to pick a simulation count based on how\n")
+cat("tightly you want each mine's mean centroid to be estimated.\n")
