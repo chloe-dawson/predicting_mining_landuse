@@ -26,19 +26,19 @@ library(dplyr)
 library(tools)
 
 # Send terra temp files to H: drive instead of C:
-terra_tmp <- "H:/scenario_analysis/terra_tmp"
+terra_tmp <- "your-file-path/terra_tmp"
 dir.create(terra_tmp, recursive = TRUE, showWarnings = FALSE)
 terraOptions(tempdir = terra_tmp)
 
 # ---- 1. File paths -----------------------------------------------------------
 
-sim_dir       <- "H:/scenario_analysis/outputs/simulations_current"
-species_path  <- "H:/scenario_analysis/data/species_selection/amphibians_species_selection.xlsx"
-output_path   <- "H:/scenario_analysis/outputs/amphibians_per_mine_overlap_current.csv"
-aoh_change_path <- "H:/scenario_analysis/outputs/amphibians_aoh_change_current.csv"
+sim_dir       <- "your-file-path/outputs/simulations_current"
+species_path  <- "your-file-path/data/species_selection/amphibians_species_selection.xlsx"
+output_path   <- "your-file-path/outputs/amphibians_per_mine_overlap_current.csv"
+aoh_change_path <- "your-file-path/outputs/amphibians_aoh_change_current.csv"
 
-updated_dir   <- "H:/scenario_analysis/data/aoh/updated_amphibians"
-original_dirs <- "H:/scenario_analysis/data/aoh/amphibians"
+updated_dir   <- "your-file-path/data/aoh/updated_amphibians"
+original_dirs <- "your-file-path/data/aoh/amphibians"
 
 dir.create(dirname(output_path), recursive = TRUE, showWarnings = FALSE)
 
