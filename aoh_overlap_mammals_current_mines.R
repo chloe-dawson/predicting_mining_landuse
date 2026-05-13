@@ -27,22 +27,22 @@ library(dplyr)
 library(tools)
 
 # Send terra temp files to H: drive instead of C:
-terra_tmp <- "H:/scenario_analysis/terra_tmp"
+terra_tmp <- "your-file-path/terra_tmp"
 dir.create(terra_tmp, recursive = TRUE, showWarnings = FALSE)
 terraOptions(tempdir = terra_tmp)
 
 # ---- 1. File paths -----------------------------------------------------------
 
-sim_dir       <- "H:/scenario_analysis/outputs/simulations_current"
-species_path  <- "H:/scenario_analysis/data/species_selection/mammals_species_selection.xlsx"
-output_path   <- "H:/scenario_analysis/outputs/mammals_per_mine_overlap_current.csv"
-aoh_change_path <- "H:/scenario_analysis/outputs/mammals_aoh_change_current.csv"
+sim_dir       <- "your-file-path/outputs/simulations_current"
+species_path  <- "your-file-path/data/species_selection/mammals_species_selection.xlsx"
+output_path   <- "your-file-path/outputs/mammals_per_mine_overlap_current.csv"
+aoh_change_path <- "your-file-path/outputs/mammals_aoh_change_current.csv"
 
-updated_dir   <- "H:/scenario_analysis/data/aoh/updated_mammals"
+updated_dir   <- "your-file-path/data/aoh/updated_mammals"
 original_dirs <- c(
-  "H:/scenario_analysis/data/aoh/mammals/freshwater",
-  "H:/scenario_analysis/data/aoh/mammals/marine_and_terrestrial",
-  "H:/scenario_analysis/data/aoh/mammals/terrestrial_only"
+  "your-file-path/data/aoh/mammals/freshwater",
+  "your-file-path/data/aoh/mammals/marine_and_terrestrial",
+  "your-file-path/data/aoh/mammals/terrestrial_only"
 )
 
 dir.create(dirname(output_path), recursive = TRUE, showWarnings = FALSE)
